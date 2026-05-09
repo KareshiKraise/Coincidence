@@ -1,0 +1,4 @@
+#include <winresrc.h>
+
+#define RT_MANIFEST_ID 1
+RT_MANIFEST_ID RT_MANIFEST "app.manifest"

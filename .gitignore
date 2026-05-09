@@ -1,0 +1,11 @@
+build/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.res
+*.idb
+.vs/
+.vscode/
+.claude/
