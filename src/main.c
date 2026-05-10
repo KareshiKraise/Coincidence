@@ -160,6 +160,7 @@ typedef struct {
     int64_t  size_max;
     BOOL     have_mtime_min;
     FILETIME mtime_min;
+    BOOL     reset_view;
 } CoinSearchTask;
 
 static unsigned g_ft_mask = 0;
@@ -416,7 +417,9 @@ static DWORD WINAPI search_thread_proc(LPVOID param) {
         coin_results_free(&g_pending_results);
         g_pending_results = r;
         ReleaseSRWLockExclusive(&g_pending_lock);
-        PostMessageW(g_main, WM_SEARCH_DONE, (WPARAM)task->version, 0);
+        PostMessageW(g_main, WM_SEARCH_DONE,
+                     (WPARAM)task->version,
+                     (LPARAM)(task->reset_view ? 1 : 0));
     } else {
         ReleaseSRWLockExclusive(&g_pending_lock);
         coin_results_free(&r);
@@ -529,12 +532,13 @@ static void parse_date_choice_into_task(CoinSearchTask *task, int choice) {
     task->have_mtime_min = TRUE;
 }
 
-static void schedule_search(void) {
+static void schedule_search_ex(BOOL reset_view) {
     CoinSearchTask *task = (CoinSearchTask*)malloc(sizeof(*task));
     if (!task) return;
     memset(task, 0, sizeof(*task));
     task->version = InterlockedIncrement(&g_search_version);
     task->flags = g_show_hidden_only ? COIN_SEARCH_HIDDEN_ONLY : 0;
+    task->reset_view = reset_view;
     GetWindowTextW(g_global_edit, task->query, ARRAYSIZE(task->query));
 
     task->ext_mask = g_ft_mask;
@@ -547,11 +551,14 @@ static void schedule_search(void) {
     }
 }
 
+static void schedule_search(void) { schedule_search_ex(TRUE); }
+static void schedule_background_search(void) { schedule_search_ex(FALSE); }
+
 static void schedule_refresh(void) {
     SetTimer(g_main, REFRESH_TIMER, REFRESH_DELAY_MS, NULL);
 }
 
-static void apply_pending_results(LONG version) {
+static void apply_pending_results(LONG version, BOOL reset_view) {
     if (version != g_search_version) return;
 
     AcquireSRWLockExclusive(&g_pending_lock);
@@ -562,16 +569,23 @@ static void apply_pending_results(LONG version) {
     }
     ReleaseSRWLockExclusive(&g_pending_lock);
 
-    SendMessageW(g_results, LVM_SETITEMCOUNT, (WPARAM)g_results_data.count, 0);
-    InvalidateRect(g_results, NULL, TRUE);
+    LPARAM count_flags = reset_view ? 0
+                                    : (LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL);
+    SendMessageW(g_results, LVM_SETITEMCOUNT,
+                 (WPARAM)g_results_data.count, count_flags);
 
-    if (g_results_data.count > 0) {
-        LVITEMW it;
-        memset(&it, 0, sizeof(it));
-        it.mask = LVIF_STATE;
-        it.state = LVIS_FOCUSED;
-        it.stateMask = LVIS_FOCUSED;
-        SendMessageW(g_results, LVM_SETITEMSTATE, 0, (LPARAM)&it);
+    if (reset_view) {
+        InvalidateRect(g_results, NULL, TRUE);
+        if (g_results_data.count > 0) {
+            LVITEMW it;
+            memset(&it, 0, sizeof(it));
+            it.mask = LVIF_STATE;
+            it.state = LVIS_FOCUSED;
+            it.stateMask = LVIS_FOCUSED;
+            SendMessageW(g_results, LVM_SETITEMSTATE, 0, (LPARAM)&it);
+        }
+    } else {
+        InvalidateRect(g_results, NULL, FALSE);
     }
 
     invalidate_chrome();
@@ -2024,7 +2038,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_have_last_sync = TRUE;
             }
             if (is_window_active()) {
-                schedule_search();
+                schedule_background_search();
                 invalidate_chrome();
             } else {
                 InterlockedExchange(&g_dirty_pending, 1);
@@ -2041,13 +2055,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_SEARCH_DONE:
-            apply_pending_results((LONG)wp);
+            apply_pending_results((LONG)wp, (BOOL)lp);
             return 0;
 
         case WM_TIMER:
             if (wp == REFRESH_TIMER) {
                 KillTimer(hwnd, REFRESH_TIMER);
-                schedule_search();
+                schedule_background_search();
                 GetLocalTime(&g_last_sync_time);
                 g_have_last_sync = TRUE;
                 invalidate_chrome();
